@@ -22,6 +22,8 @@ from aiohttp.client_exceptions import (
 )
 from aiohttp.web import HTTPForbidden
 from bs4 import BeautifulSoup
+from http.client import RemoteDisconnected
+from requests.exceptions import ConnectionError
 
 from constants import (
     CHUNK_SIZE,
@@ -87,17 +89,15 @@ class GamesScraper():
             links = soup.select(
                 'div#main_content div.browse_list_wrapper table.clamp-list '
                 'tr.expand_collapse td.details a.title')
-            links = ([a['href'],] for a in links)
+            links = [[a['href'],] for a in links]
             next_page_el = soup.select_one('div.page_nav div.page_flipper span.flipper.next a')
-            next_page_url = next_page_el['href'] if next_page_el else None
+            next_page_url = urljoin(self.BASE_URL, next_page_el['href']) if next_page_el else None
         except (
-            ClientConnectorError,
-            ClientHttpProxyError,
-            ClientPayloadError,
-            HTTPForbidden,
-            ServerDisconnectedError,
+            ConnectionError,
+            RemoteDisconnected,
         ) as http_error:
             logging.error("Connection error occurred: %s", http_error)
+            return links, url
         except Exception:
             logging.exception("An error occurred due to getting links from page %s", url)
         return links, next_page_url
@@ -116,10 +116,9 @@ class GamesScraper():
         """
 
         logging.info("Getting links.")
-        open(self.LINKS_FILE, 'w+', encoding='utf-8').close()
-        next_page = True
-        while next_page:
-            links, next_page = self.parse_list_page(url)
+        open(self.LINKS_FILE, 'w', encoding='utf-8').close()
+        while url:
+            links, url = self.parse_list_page(url)
             with open(self.LINKS_FILE, 'a', encoding='utf-8') as file:
                 csv_writer = csv.writer(file)
                 csv_writer.writerows(links)
@@ -169,11 +168,11 @@ class GamesScraper():
         rating = soup.select_one('div.side_details ul.summary_details '
                                  'li.product_rating span.data')
         rating = rating.text.strip() if rating else None
-        metascore = soup.select_one('div.metascore_summary div.metascore_w span')
+        metascore = soup.select_one('div.metascore_summary.metascore_summary div.metascore_w span')
         metascore = metascore.text.strip() if metascore else None
         number_of_critic_reviews = soup.select_one('div.metascore_summary div.metascore_wrap '
                                                    'div.summary span.count a span').text.strip()
-        user_score = soup.select_one('div.score_summary div.metascore_w')
+        user_score = soup.select_one('div.score_summary div.userscore_wrap  div.metascore_w')
         user_score = user_score.text.strip() if user_score else None
         number_of_user_ratings = soup.select_one('div.score_summary div.userscore_wrap '
                                                  'div.summary span.count a')
@@ -214,7 +213,7 @@ class GamesScraper():
                     logging.debug("Max concurrent requests number have been reached. Waiting...")
                 await asyncio.sleep(random.randint(0, REQUEST_DELAY))
                 async with session.get(
-                    urljoin(self.BASE_URL, url), headers=self._get_headers(), timeout=180
+                    url, headers=self._get_headers(), timeout=180
                 ) as response:
                     logging.debug(response)
                     if response.status == 403:
@@ -281,7 +280,7 @@ class GamesScraper():
                 tasks = [asyncio.create_task(self.worker(session, data_file))
                          for _ in range(CHUNK_SIZE)]
                 async for url in links_file:
-                    url = url.rstrip()
+                    url = urljoin(self.BASE_URL, url.rstrip())
                     logging.debug("Put link %s into queue.", url)
                     await self.queue.put(url)
                 await self.queue.join()

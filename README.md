@@ -19,6 +19,8 @@ Result file contains data in csv format and has fields listed below:
 - number_of_user_ratings
 - awards_and_ranking
 
+[The dataset on Kaggle](https://www.kaggle.com/datasets/darianogina/best-video-games-of-all-time-metacritic)
+
 ### Game details page
 
 <img src="https://pai-pai-github-images.s3.amazonaws.com/games-scraper-page.png" height="75%" width="75%" alt="Collected data" />
