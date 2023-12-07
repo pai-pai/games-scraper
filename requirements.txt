@@ -1,4 +1,6 @@
 aiofiles
 aiohttp
-bs4
 requests
+selectolax
+hrequests[all]
+pandas

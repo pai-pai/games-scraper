@@ -6,10 +6,14 @@ import asyncio
 import csv
 import logging
 import random
+import re
+import time
 
 import aiofiles
 import aiohttp
 import requests
+import hrequests
+import pandas as pd
 
 from urllib.parse import urljoin
 from typing import TextIO, Union
@@ -21,9 +25,9 @@ from aiohttp.client_exceptions import (
     ServerDisconnectedError,
 )
 from aiohttp.web import HTTPForbidden
-from bs4 import BeautifulSoup
 from http.client import RemoteDisconnected
 from requests.exceptions import ConnectionError
+from selectolax.parser import HTMLParser
 
 from constants import (
     CHUNK_SIZE,
@@ -52,15 +56,15 @@ class GamesScraper():
     DATA_FILE = 'games.csv'
     DATA_FIELDS = [
         'link', 'name', 'release_date', 'developer', 'platform', 'additional_platforms',
-        'summary', 'genres', 'number_of_players', 'rating', 'metascore',
+        'summary', 'genres', 'rating', 'metascore',
         'number_of_critic_reviews', 'user_score', 'number_of_user_ratings',
-        'awards_and_ranking',
     ]
     BASE_URL = 'https://www.metacritic.com/'
 
     def __init__(self) -> None:
         self.queue = None
         self.max_requests = asyncio.Semaphore(CONCURRENT_REQUESTS)
+        self.unprocessed_links = set()
 
     def _get_headers(self):
         """Returns Chrome/Safari/Brave request headers dict.
@@ -68,41 +72,42 @@ class GamesScraper():
         """
         return random.choice(HEADERS)
 
-    def parse_list_page(self, url: str) -> tuple[list, Union[str, None]]:
+    def parse_list_page(self, page_number: int=1) -> tuple[list, Union[int, None]]:
         """ Gets links from list page.
 
         Parameters
         ----------
-        url : str
-            An url of the page.
+        page_number : int
+            Page number.
 
         Returns
         -------
-        tuple[list, Union[str, None]]
-            Links to write into file; url of the next page (if any).
+        tuple[list, Union[int, None]]
+            Links to write into file; Number of the next page (if any).
         """
 
-        links, next_page_url = [], None
+        links, next_page = [], None
+        list_page_url = 'https://www.metacritic.com/browse/game/'\
+            f'?releaseYearMin=1910&releaseYearMax=2023&page={page_number}'
         try:
-            response = requests.get(url, headers=self._get_headers(), timeout=180)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            links = soup.select(
-                'div#main_content div.browse_list_wrapper table.clamp-list '
-                'tr.expand_collapse td.details a.title')
-            links = [[a['href'],] for a in links]
-            next_page_el = soup.select_one('div.page_nav div.page_flipper span.flipper.next a')
-            next_page_url = urljoin(self.BASE_URL, next_page_el['href']) if next_page_el else None
+            logging.info("Go to page number %s: %s", page_number, list_page_url)
+            response = requests.get(list_page_url, headers=self._get_headers(), timeout=180)
+            page_tree = HTMLParser(response.content)
+            links = [[node.attributes.get('href'),] for node in
+                     page_tree.css('a.c-finderProductCard_container')]
+            if page_tree.css_first('span.c-navigationPagination_item--next.enabled') is not None:
+                next_page = page_number + 1
         except (
             ConnectionError,
             RemoteDisconnected,
         ) as http_error:
             logging.error("Connection error occurred: %s", http_error)
-            return links, url
+            return links, next_page
         except Exception:
-            logging.exception("An error occurred due to getting links from page %s", url)
-        return links, next_page_url
+            logging.exception("An error occurred due to getting links from page %s", list_page_url)
+        return links, next_page
 
-    def get_links(self, url: str) -> None:
+    def get_links(self, page_number: int=1) -> None:
         """Gets all links from 'game' category.
 
         Parameters
@@ -117,12 +122,15 @@ class GamesScraper():
 
         logging.info("Getting links.")
         open(self.LINKS_FILE, 'w', encoding='utf-8').close()
-        while url:
-            links, url = self.parse_list_page(url)
+        while page_number:
+            links, page_number = self.parse_list_page(page_number)
             with open(self.LINKS_FILE, 'a', encoding='utf-8') as file:
                 csv_writer = csv.writer(file)
                 csv_writer.writerows(links)
         logging.info("Links were collected.")
+
+    def extract_text(self, node):
+        return node.text(strip=True) if node else None
 
     def parse_details_page(self, content: str) -> list[str]:
         """Gets data about game from details page.
@@ -138,54 +146,66 @@ class GamesScraper():
             Game details as a list.
         """
 
-        soup = BeautifulSoup(content, 'html.parser')
-        name = soup.select_one('div.product_title a h1').text
-        release_date = soup.select_one('div.product_data ul.summary_details '
-                                       'li.release_data span.data').text
-        developer = soup.select_one('div.side_details ul.summary_details '
-                                    'li.developer span.data')
-        developer = developer.get_text(strip=True) if developer else None
-        platform = soup.select_one('div.product_title span.platform').get_text(strip=True)
-        additional_platforms = soup.select_one(
-            'div.product_data ul.summary_details '
-            'li.product_platforms span.data')
-        additional_platforms = additional_platforms.get_text(strip=True)\
-            if additional_platforms else None
-        summary = soup.select_one('div.product_details ul.summary_details '
-                                  'li.product_summary span.data span.blurb_expanded')
-        if summary is None:
-            summary = soup.select_one('div.product_details ul.summary_details '
-                                      'li.product_summary span.data span')
-        summary = summary.get_text(strip=True) if summary else None
-        genres = ','.join((
-            span.text.strip() for span
-            in soup.select('div.side_details ul.summary_details '
-                           'li.product_genre span.data')
-        ))
-        number_of_players = soup.select_one('div.side_details ul.summary_details '
-                                            'li.product_players span.data')
-        number_of_players = number_of_players.text.strip() if number_of_players else None
-        rating = soup.select_one('div.side_details ul.summary_details '
-                                 'li.product_rating span.data')
-        rating = rating.text.strip() if rating else None
-        metascore = soup.select_one('div.metascore_summary.metascore_summary div.metascore_w span')
-        metascore = metascore.text.strip() if metascore else None
-        number_of_critic_reviews = soup.select_one('div.metascore_summary div.metascore_wrap '
-                                                   'div.summary span.count a span').text.strip()
-        user_score = soup.select_one('div.score_summary div.userscore_wrap  div.metascore_w')
-        user_score = user_score.text.strip() if user_score else None
-        number_of_user_ratings = soup.select_one('div.score_summary div.userscore_wrap '
-                                                 'div.summary span.count a')
-        number_of_user_ratings = number_of_user_ratings.text.strip()\
+        page_tree = HTMLParser(content)
+        name = page_tree.css_first('meta[property="og:title"]')
+        if name is not None:
+            name = name.attributes.get('content')
+        else:
+            name = self.extract_text(page_tree.css_first('.c-productHero_title'))
+        release_date = self.extract_text(
+            page_tree.css_first('.c-productHero_score-container .g-text-xsmall .u-text-uppercase')
+        )
+        developer = self.extract_text(
+            page_tree.css_first('.c-gameDetails .c-gameDetails_Developer ul li')
+        )
+        platform = self.extract_text(
+            page_tree.css_first('.c-ProductHeroGamePlatformInfo .c-gamePlatformLogo')
+        )
+        additional_platforms = page_tree.css(
+            '.c-gameDetails_sectionContainer .c-gameDetails_Platforms ul li'
+        ) or []
+        additional_platforms = ', '.join((node.text(strip=True) for node in additional_platforms))
+        summary = page_tree.css_first('meta[name="description"]').attributes.get('content')
+        summary = summary.replace('\n', ' ')
+        genres = page_tree.css('.c-gameDetails_sectionContainer ul.c-genreList li') or []
+        genres = ', '.join((node.text(strip=True) for node in genres))
+        rating = self.extract_text(
+            page_tree.css_first('.c-productionDetailsGame_esrb_title span.u-block')
+        )
+        rating = rating.replace('Rated ', '') if rating is not None else None
+        metascore = self.extract_text(
+            page_tree.css_first(
+                '.c-reviewsSection_criticReviews .c-reviewsOverview '
+                '.c-ScoreCard_scoreContent > a > div > div > span'
+            )
+        )
+        number_of_critic_reviews = self.extract_text(
+            page_tree.css_first(
+                '.c-reviewsSection_criticReviews .c-reviewsOverview '
+                'span.c-ScoreCard_reviewsTotal'
+            )
+        )
+        number_of_critic_reviews = re.sub(r'\D', '', number_of_critic_reviews) \
+            if number_of_critic_reviews else None
+        user_score = self.extract_text(
+            page_tree.css_first(
+                '.c-reviewsSection_userReviews .c-reviewsOverview '
+                '.c-ScoreCard_scoreContent > a > div > div > span'
+            )
+        )
+        number_of_user_ratings = self.extract_text(
+            page_tree.css_first(
+                '.c-reviewsSection_userReviews .c-reviewsOverview '
+                'span.c-ScoreCard_reviewsTotal'
+            )
+        )
+        number_of_user_ratings = re.sub(r'\D', '', number_of_user_ratings) \
             if number_of_user_ratings else None
-        awards_and_ranking = ','.join((
-            a.text for a in soup.select('table.rankings td.ranking_wrap div.ranking_title a')
-        ))
+
         result = [
             name, release_date, developer, platform, additional_platforms,
-            summary, genres, number_of_players, rating, metascore,
-            number_of_critic_reviews, user_score, number_of_user_ratings,
-            awards_and_ranking,
+            summary, genres, rating, metascore, number_of_critic_reviews,
+            user_score, number_of_user_ratings,
         ]
         return result
 
@@ -288,6 +308,47 @@ class GamesScraper():
             task.cancel()
         logging.info("Data extraction is finished.")
 
+    def get_chunk(self):
+        for chunk in pd.read_csv(self.LINKS_FILE, chunksize=CONCURRENT_REQUESTS,
+                                 header=None, names=['link']):
+            chunk['link'] = chunk['link'].apply(lambda x: urljoin(self.BASE_URL, x))
+            yield list(chunk['link'])
+
+    def exception_handler(self, request, exception):
+        url = request.url
+        logging.error("An error occurred due to getting data from %s for %s time",
+                      url, 2 if url in self.unprocessed_links else 1)
+        logging.error(exception)
+        self.unprocessed_links.add(url)
+
+    def process_links(self, links):
+        processed_rows = []
+        reqs = [hrequests.async_get(link, timeout=60) for link in links]
+        for resp in hrequests.imap(
+            reqs, size=len(links), exception_handler=self.exception_handler
+        ):
+            logging.info('Collect data from %s', resp.url)
+            game_data = self.parse_details_page(resp.content)
+            processed_rows.append([resp.url] + game_data)
+        return processed_rows
+
+    def new_get_data(self):
+        logging.info("Getting data process has started.")
+        with open(self.DATA_FILE, 'w', encoding='utf-8') as file:
+            csv_writer = csv.writer(file)
+            csv_writer.writerow(self.DATA_FIELDS)
+            for links in self.get_chunk():
+                csv_writer.writerows(self.process_links(links))
+                time.sleep(random.randint(1,3))
+
+        # Process failed links
+        while self.unprocessed_links:
+            unprocessed_links = list(self.unprocessed_links)
+            links = unprocessed_links[:CONCURRENT_REQUESTS]
+            csv_writer.writerows(self.process_links(links))
+            self.unprocessed_links = set(unprocessed_links[CONCURRENT_REQUESTS:])
+        logging.info("Data extraction is finished.")
+
 
 async def runner():
     """
@@ -297,11 +358,15 @@ async def runner():
     """
 
     crawler = GamesScraper()
-    crawler.get_links(
-        'https://www.metacritic.com/browse/games/score/'
-        'metascore/all/all/filtered?view=condensed')
+    #crawler.get_links()
     await crawler.get_data()
+
+def new_runner():
+    crawler = GamesScraper()
+    #crawler.get_links()
+    crawler.new_get_data()
 
 
 if __name__ == "__main__":
-    asyncio.run(runner())
+    #asyncio.run(runner())
+    new_runner()
