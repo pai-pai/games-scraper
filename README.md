@@ -1,35 +1,35 @@
 # games-scraper
 
-Extract data about games from www.metacritic.com.
+Extract games data from www.metacritic.com.
 
-Result file contains data in csv format and has fields listed below:
+Result file contains data in csv format and has fields listed below.
+
+Common field:
 - link
 - name
-- release_date
 - developer
-- platform
-- additional_platforms
+- publisher
 - summary
 - genres
-- number_of_players
 - rating
+
+Platform specific fields:
+- platform
+- release_date
 - metascore
-- number_of_critic_reviews
+- critic_reviews_count
+- positive_critic_reviews_count
+- mixed_critic_reviews_count
+- negative_critic_reviews_count
 - user_score
-- number_of_user_ratings
-- awards_and_ranking
+- user_reviews_count
+- positive_user_reviews_count
+- mixed_user_reviews_count
+- negative_user_reviews_count
 
 [The dataset on Kaggle](https://www.kaggle.com/datasets/darianogina/best-video-games-of-all-time-metacritic)
 
-### Game details page
-
-<img src="https://pai-pai-github-images.s3.amazonaws.com/games-scraper-page.png" height="75%" width="75%" alt="Collected data" />
-
-### Collected games
-
-<img src="https://pai-pai-github-images.s3.amazonaws.com/games-scraper-result.png" height="75%" width="75%" alt="Collected data" />
-
 ## Technology stack
-- Beautiful Soup -- to extract data from pages
-- requests -- for the 1st step of scraper (put links into intermediate 'games_links' file)
-- aiohttp -- for the 2nd step (using data from 'games_links' visit every game details page)
+- selectolax -- to extract data from pages
+- hrequests -- to avoid to be blocked
+- chompjs -- to convert json string to normal json

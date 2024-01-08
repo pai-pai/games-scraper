@@ -1,6 +1,3 @@
-aiofiles
-aiohttp
-requests
 selectolax
 hrequests[all]
-pandas
+chompjs
